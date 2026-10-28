@@ -1,0 +1,15 @@
+{
+  "name": "asia-torbox-addon",
+  "version": "1.0.0",
+  "description": "Asian Dramas (KR/CN/JP/TH) with Torbox streams, prioritizing pt-BR audio/subs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "^1.6.10"
+  }
+}
