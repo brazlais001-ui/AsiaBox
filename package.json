@@ -1,15 +1,18 @@
 {
-  "name": "asia-torbox-addon",
+  "name": "stremio-asiabox",
   "version": "1.0.0",
-  "description": "Asian Dramas (KR/CN/JP/TH) with Torbox streams, prioritizing pt-BR audio/subs",
+  "description": "AsiaBox — K-Drama / C-Drama / J-Drama. Prioridade: LEG PT-BR → DUB PT-BR → ORIGINAL",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
-  "engines": {
-    "node": ">=18"
-  },
+  "keywords": ["stremio","addon","kdrama","cdrama","jdrama","dorama","pt-br"],
+  "author": "AsiaBox",
+  "license": "MIT",
   "dependencies": {
-    "stremio-addon-sdk": "^1.6.10"
-  }
+    "stremio-addon-sdk": "^1.6.10",
+    "cheerio": "^1.0.0"
+  },
+  "engines": { "node": ">=18" }
 }
