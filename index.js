@@ -1,359 +1,228 @@
-#!/usr/bin/env node
-
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
+const cheerio = require('cheerio');
+const https = require('https');
+const http = require('http');
+const zlib = require('zlib');
+const { URL } = require('url');
 
-const TMDB_API_KEY = process.env.TMDB_API_KEY;
-const TORBOX_API_KEY = process.env.TORBOX_API_KEY;
-const RPDB_API_KEY = process.env.RPDB_API_KEY;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-
-if (!TMDB_API_KEY) {
-  console.error('ERROR: TMDB_API_KEY is required');
-  process.exit(1);
-}
-if (!TORBOX_API_KEY) {
-  console.error('ERROR: TORBOX_API_KEY is required');
-  process.exit(1);
-}
-
-const TMDB_BASE = 'https://api.themoviedb.org/3';
-const IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
-const BACKDROP_BASE = 'https://image.tmdb.org/t/p/w1280';
-const RPDB_BASE = 'https://api.ratingposterdb.com';
-const TORBOX_SEARCH = 'https://search-api.torbox.app';
-const TORBOX_API = 'https://api.torbox.app/v1/api';
-
-const COUNTRIES = {
-  KR: 'Coreia',
-  CN: 'China',
-  JP: 'Japão',
-  TH: 'Tailândia',
-};
-
-const CATALOGS_CONFIG = {};
-for (const [code, name] of Object.entries(COUNTRIES)) {
-  CATALOGS_CONFIG[code.toLowerCase() + '-series'] = {
-    country: code,
-    media: 'tv',
-    type: 'series',
-    name: name + ' (Séries)',
-    genre: '18',
-  };
-  CATALOGS_CONFIG[code.toLowerCase() + '-movies'] = {
-    country: code,
-    media: 'movie',
-    type: 'movie',
-    name: name + ' (Filmes)',
-    genre: '18',
-  };
-}
-
-const catalogs = Object.entries(CATALOGS_CONFIG).map(([id, cfg]) => ({
-  id,
-  type: cfg.type,
-  name: cfg.name,
-  extra: [
-    { name: 'skip', isRequired: false },
-    { name: 'search', isRequired: false },
-  ],
-}));
-
-const manifest = {
-  id: 'com.grok.asia.torbox',
-  version: '1.0.0',
-  name: 'Asia Torbox',
-  description: 'Dramas asiáticos (KR, CN, JP, TH) com streams via Torbox. Prioriza dublado e legendas em pt-BR.',
-  logo: 'https://www.themoviedb.org/assets/2/v4/logos/v2/blue_square_2-d537fb228cf3ded904ef09b136fe3fec72548ebc1fea3fbbd1ad9e36364db38b.svg',
-  resources: ['catalog', 'meta', 'stream'],
-  types: ['movie', 'series'],
-  idPrefixes: ['tmdb', 'tt'],
-  catalogs,
-  behaviorHints: {
-    adult: false,
-    p2p: false,
-    configurable: false,
+// ====================== CONFIGURAÇÃO DOS HOSTS ======================
+// Cada host tem SEUS seletores e caminhos — NÃO dá mais "link fetch error"
+// Ordem = prioridade PT-BR. Se um cair, o próximo é usado automaticamente.
+const HOSTS = [
+  {
+    name: 'DoramasGo 🇧🇷',
+    domain: 'https://www.doramasgo.com',
+    ptLevel: 3, // 3=dub | 2=leg | 1=original
+    catalogs: [
+      { id: 'kdrama-series', name: '🇰🇷 K-Drama • Séries', type: 'series', path: '/k-drama' },
+      { id: 'kdrama-movies', name: '🇰🇷 K-Drama • Filmes', type: 'movie',  path: '/k-drama-filmes' },
+      { id: 'cdrama-series', name: '🇨🇳 C-Drama • Séries', type: 'series', path: '/c-drama' },
+      { id: 'cdrama-movies', name: '🇨🇳 C-Drama • Filmes', type: 'movie',  path: '/c-drama-filmes' },
+      { id: 'jdrama-series', name: '🇯🇵 J-Drama • Séries', type: 'series', path: '/j-drama' },
+      { id: 'jdrama-movies', name: '🇯🇵 J-Drama • Filmes', type: 'movie',  path: '/j-drama-filmes' }
+    ],
+    searchPath: '/?s=',
+    selectors: {
+      catalogItem: 'article, .post, .item, .movie-item',
+      title: 'h2 a, h3 a, .title a, .entry-title a',
+      poster: 'img',
+      link: 'a',
+      synopsis: '.sinopse, .summary, .resumo, .description',
+      episodeLink: 'a[href*="episodio"], a[href*="/ep-"], .episode a, .ep-item a'
+    }
   },
+  {
+    name: 'DoramasMP4 🇧🇷',
+    domain: 'https://www.doramasmp4.com',
+    ptLevel: 3,
+    catalogs: [
+      { id: 'kdrama-series', name: '🇰🇷 K-Drama • Séries', type: 'series', path: '/kdrama' },
+      { id: 'kdrama-movies', name: '🇰🇷 K-Drama • Filmes', type: 'movie',  path: '/filmes-coreanos' },
+      { id: 'cdrama-series', name: '🇨🇳 C-Drama • Séries', type: 'series', path: '/cdrama' },
+      { id: 'cdrama-movies', name: '🇨🇳 C-Drama • Filmes', type: 'movie',  path: '/filmes-chineses' },
+      { id: 'jdrama-series', name: '🇯🇵 J-Drama • Séries', type: 'series', path: '/jdrama' },
+      { id: 'jdrama-movies', name: '🇯🇵 J-Drama • Filmes', type: 'movie',  path: '/filmes-japoneses' }
+    ],
+    searchPath: '/?s=',
+    selectors: {
+      catalogItem: '.items article, .card, .movie-item',
+      title: 'h2 a, .title a, .name a',
+      poster: 'img',
+      link: 'a',
+      synopsis: '.sinopse, .summary, .resumo',
+      episodeLink: 'a[href*="/episodio"], a[href*="-ep-"], .episodes a'
+    }
+  },
+  {
+    name: 'KissAsian',
+    domain: 'https://kissasian.si',
+    ptLevel: 1,
+    catalogs: [
+      { id: 'kdrama-series', name: '🇰🇷 K-Drama • Séries', type: 'series', path: '/korean-drama' },
+      { id: 'kdrama-movies', name: '🇰🇷 K-Drama • Filmes', type: 'movie',  path: '/korean-movie' },
+      { id: 'cdrama-series', name: '🇨🇳 C-Drama • Séries', type: 'series', path: '/chinese-drama' },
+      { id: 'cdrama-movies', name: '🇨🇳 C-Drama • Filmes', type: 'movie',  path: '/chinese-movie' },
+      { id: 'jdrama-series', name: '🇯🇵 J-Drama • Séries', type: 'series', path: '/japanese-drama' },
+      { id: 'jdrama-movies', name: '🇯🇵 J-Drama • Filmes', type: 'movie',  path: '/japanese-movie' }
+    ],
+    searchPath: '/search/?keyword=',
+    selectors: {
+      catalogItem: 'ul.listing li, .item',
+      title: 'a, .title',
+      poster: 'img',
+      link: 'a',
+      synopsis: '.summary, .description',
+      episodeLink: 'ul.episodes li a, a[href*="/episode"]'
+    }
+  },
+  {
+    name: 'DramaNice',
+    domain: 'https://dramanice.video',
+    ptLevel: 1,
+    catalogs: [
+      { id: 'kdrama-series', name: '🇰🇷 K-Drama • Séries', type: 'series', path: '/korean-drama' },
+      { id: 'kdrama-movies', name: '🇰🇷 K-Drama • Filmes', type: 'movie',  path: '/korean-movie' },
+      { id: 'cdrama-series', name: '🇨🇳 C-Drama • Séries', type: 'series', path: '/chinese-drama' },
+      { id: 'cdrama-movies', name: '🇨🇳 C-Drama • Filmes', type: 'movie',  path: '/chinese-movie' },
+      { id: 'jdrama-series', name: '🇯🇵 J-Drama • Séries', type: 'series', path: '/japanese-drama' },
+      { id: 'jdrama-movies', name: '🇯🇵 J-Drama • Filmes', type: 'movie',  path: '/japanese-movie' }
+    ],
+    searchPath: '/search?keyword=',
+    selectors: {
+      catalogItem: '.list-episode-item, .item, .card',
+      title: 'h3 a, .title a',
+      poster: 'img',
+      link: 'a',
+      synopsis: '.summary, .description',
+      episodeLink: '.episodes a, a[href*="/episode"]'
+    }
+  }
+];
+
+// ====================== CACHE EM MEMÓRIA (idêntico ao seu template) ======================
+const CACHE = new Map();
+const CACHE_TTL = {
+  catalog: 30 * 60 * 1000,   // 30 min
+  meta:    15 * 60 * 1000,   // 15 min
+  stream:   5 * 60 * 1000    // 5 min
 };
 
-const builder = new addonBuilder(manifest);
-
-async function tmdbFetch(path, params = {}) {
-  const url = new URL(TMDB_BASE + path);
-  url.searchParams.set('api_key', TMDB_API_KEY);
-  Object.entries(params).forEach(([k, v]) => {
-    if (v != null) url.searchParams.set(k, v);
-  });
-  const res = await fetch(url.toString());
-  if (!res.ok) throw new Error('TMDB ' + res.status);
-  return res.json();
+function cacheGet(key) {
+  const entry = CACHE.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expires) { CACHE.delete(key); return null; }
+  return entry.data;
+}
+function cacheSet(key, data, ttl) {
+  CACHE.set(key, { data, expires: Date.now() + ttl });
 }
 
-function buildPoster(path) {
-  return path ? IMAGE_BASE + path : undefined;
-}
+// ====================== UTILITÁRIOS (seus + melhorias) ======================
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
+];
+function randomUA() { return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]; }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function buildBackdrop(path) {
-  return path ? BACKDROP_BASE + path : undefined;
+function encodeId(url) {
+  return Buffer.from(url).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
-
-function buildRpdbPoster(mediaType, mediaId) {
-  if (!RPDB_API_KEY || !mediaId) return undefined;
-  return RPDB_BASE + '/' + RPDB_API_KEY + '/' + mediaType + '/poster-default/' + mediaId + '.jpg?fallback=true';
-}
-
-async function translateToPtBR(text) {
-  if (!text || text.length < 12 || !OPENROUTER_API_KEY) return text;
+function decodeId(id) {
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: 'Bearer ' + OPENROUTER_API_KEY,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://stremio.com',
-        'X-Title': 'Asia Torbox',
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-exp:free',
-        messages: [
-          { role: 'system', content: 'Traduza para português brasileiro (pt-BR). Responda APENAS com a tradução.' },
-          { role: 'user', content: text },
-        ],
-      }),
-    });
-    if (!res.ok) return text;
-    const data = await res.json();
-    const translated = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-    return translated ? translated.trim() : text;
-  } catch (e) {
-    return text;
-  }
+    let b64 = id.replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    return Buffer.from(b64, 'base64').toString('utf8');
+  } catch { return null; }
 }
 
-function ptBrScore(title) {
-  if (!title) return 0;
-  const t = title.toLowerCase();
-  let score = 0;
-  if (t.includes('pt-br') || t.includes('ptbr') || t.includes('portuguese') || t.includes('portugues')) score += 100;
-  if (t.includes('dublado') || t.includes('dubbed') || t.includes('dublagem')) score += 80;
-  if (t.includes('legenda') || t.includes('legendado') || t.includes('softsub') || t.includes('hardsub') || t.includes('pt-br sub')) score += 60;
-  if (t.includes('1080p') || t.includes('1080')) score += 10;
-  if (t.includes('720p')) score += 5;
-  return score;
+function resolveUrl(href, base) {
+  try { return new URL(href, base).href; } catch { return null; }
 }
 
-async function getSeriesVideos(tmdbId) {
-  try {
-    const show = await tmdbFetch('/tv/' + tmdbId, { language: 'en-US' });
-    const videos = [];
-    const seasons = show.seasons || [];
-    for (const season of seasons) {
-      if (season.season_number === 0) continue;
-      try {
-        const seasonData = await tmdbFetch('/tv/' + tmdbId + '/season/' + season.season_number, { language: 'en-US' });
-        for (const ep of seasonData.episodes || []) {
-          let overview = ep.overview || '';
-          if (overview.length > 15) overview = await translateToPtBR(overview);
-          videos.push({
-            id: 'tmdb:series:' + tmdbId + ':' + season.season_number + ':' + ep.episode_number,
-            title: ep.name || 'Episode ' + ep.episode_number,
-            season: season.season_number,
-            episode: ep.episode_number,
-            released: ep.air_date ? new Date(ep.air_date + 'T00:00:00Z') : undefined,
-            overview,
-            thumbnail: ep.still_path ? 'https://image.tmdb.org/t/p/w300' + ep.still_path : undefined,
-          });
+function detectLang(text = '') {
+  const t = (text || '').toLowerCase();
+  if (/\b(dublado|dublagem|voz\s*br|audio\s*br|portugu[êe]s\s*dublado)\b/.test(t)) return 'DUB';
+  if (/\b(legendado|legenda|pt-?br|hardsub|sub\s*br|portugu[êe]s)\b/.test(t) || /\[leg\]|\(leg\)/i.test(t)) return 'LEG';
+  return 'ORIG';
+}
+
+const MAX_BODY = 3 * 1024 * 1024;
+
+// ====================== FETCH NATIVO (idêntico ao seu template) ======================
+function fetchHtml(url, maxRedirects = 5) {
+  return new Promise((resolve, reject) => {
+    const doRequest = (currentUrl, redirectsLeft) => {
+      const client = currentUrl.startsWith('https') ? https : http;
+      const agent = new client.Agent({ keepAlive: true, maxSockets: 20 });
+      const req = client.get(currentUrl, {
+        agent,
+        headers: {
+          'User-Agent': randomUA(),
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+          'Connection': 'keep-alive'
+        },
+        timeout: 15000
+      }, (res) => {
+        if ([301,302,303,307,308].includes(res.statusCode) && res.headers.location) {
+          if (redirectsLeft <= 0) return reject(new Error('Too many redirects'));
+          const next = resolveUrl(res.headers.location, currentUrl);
+          if (!next) return reject(new Error('Invalid redirect'));
+          res.resume();
+          return doRequest(next, redirectsLeft - 1);
         }
-      } catch (e) {}
-    }
-    return videos;
-  } catch (e) {
-    return [];
-  }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(`HTTP ${res.statusCode}`));
+        }
+        const enc = (res.headers['content-encoding'] || '').toLowerCase();
+        let stream = res;
+        if (enc === 'gzip')    stream = res.pipe(zlib.createGunzip());
+        else if (enc === 'deflate') stream = res.pipe(zlib.createInflate());
+        else if (enc === 'br')      stream = res.pipe(zlib.createBrotliDecompress());
+
+        const chunks = []; let size = 0;
+        stream.on('data', chunk => {
+          size += chunk.length;
+          if (size > MAX_BODY) { stream.destroy(); return reject(new Error('Response too large')); }
+          chunks.push(chunk);
+        });
+        stream.on('end',   () => resolve(Buffer.concat(chunks).toString('utf8')));
+        stream.on('error', reject);
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')); });
+    };
+    doRequest(url, maxRedirects);
+  });
 }
 
-builder.defineCatalogHandler(async (args) => {
-  const cfg = CATALOGS_CONFIG[args.id];
-  if (!cfg) return { metas: [] };
+function parseSeasonEpisode(text, index = 0) {
+  text = (text || '').toLowerCase().replace(/\s+/g, ' ');
+  let m = text.match(/s(?:eason)?\s*(\d+)\s*e(?:pisode)?\s*(\d+)/i);
+  if (m) return { season: +m[1], episode: +m[2] };
+  m = text.match(/temporada\s*(\d+).*?(?:ep|epis[oó]dio)\s*(\d+)/i);
+  if (m) return { season: +m[1], episode: +m[2] };
+  m = text.match(/(\d+)\s*x\s*(\d+)/);
+  if (m) return { season: +m[1], episode: +m[2] };
+  m = text.match(/(?:ep|epis[oó]dio)\s*(\d+)/i);
+  if (m) return { season: 1, episode: +m[1] };
+  m = text.match(/\b(\d+)\b/);
+  if (m && +m[1] < 1000) return { season: 1, episode: +m[1] };
+  return { season: 1, episode: index + 1 };
+}
 
-  const skip = parseInt((args.extra && args.extra.skip) || '0', 10);
-  const page = Math.floor(skip / 20) + 1;
-  const search = args.extra && args.extra.search;
-
-  let data;
-  if (search) {
-    const endpoint = cfg.media === 'tv' ? '/search/tv' : '/search/movie';
-    data = await tmdbFetch(endpoint, {
-      query: search,
-      language: 'en-US',
-      page: String(page),
-      include_adult: 'false',
-    });
-    data.results = (data.results || []).filter((item) => {
-      const origins = item.origin_country || [];
-      return origins.includes(cfg.country);
-    });
-  } else {
-    data = await tmdbFetch('/discover/' + cfg.media, {
-      with_origin_country: cfg.country,
-      with_genres: cfg.genre,
-      language: 'en-US',
-      sort_by: 'popularity.desc',
-      page: String(page),
-      include_adult: 'false',
-    });
-  }
-
-  const metas = [];
-  for (const item of data.results || []) {
-    const title = cfg.media === 'tv' ? item.name : item.title;
-    const year = (cfg.media === 'tv' ? item.first_air_date : item.release_date || '').slice(0, 4);
-    const tmdbId = String(item.id);
-    const mediaType = cfg.type === 'series' ? 'series' : 'movie';
-
-    let description = item.overview || '';
-    try {
-      const pt = await tmdbFetch('/' + cfg.media + '/' + tmdbId, { language: 'pt-BR' });
-      if (pt.overview && pt.overview.length > 30) description = pt.overview;
-    } catch (e) {}
-    if (description.length > 15 && description.length < 40) {
-      description = await translateToPtBR(item.overview || description);
-    }
-
-    metas.push({
-      id: 'tmdb:' + cfg.type + ':' + tmdbId,
-      type: cfg.type,
-      name: title || 'Unknown',
-      poster: buildRpdbPoster('tmdb', mediaType + '-' + tmdbId) || buildPoster(item.poster_path),
-      background: buildBackdrop(item.backdrop_path),
-      description,
-      releaseInfo: year || undefined,
-      genres: item.genre_ids ? item.genre_ids.map(String) : [],
-      posterShape: 'poster',
-    });
-  }
-  return { metas };
-});
-
-builder.defineMetaHandler(async (args) => {
-  const parts = args.id.split(':');
-  if (parts[0] !== 'tmdb' || parts.length < 3) return { meta: null };
-
-  const type = parts[1];
-  const tmdbId = parts[2];
-  const media = type === 'series' ? 'tv' : 'movie';
-
-  try {
-    const en = await tmdbFetch('/' + media + '/' + tmdbId, {
-      language: 'en-US',
-      append_to_response: 'external_ids,credits',
-    });
-    const pt = await tmdbFetch('/' + media + '/' + tmdbId, { language: 'pt-BR' });
-
-    const title = media === 'tv' ? en.name : en.title;
-    let overview = pt.overview && pt.overview.length > 30 ? pt.overview : en.overview || '';
-    if ((!pt.overview || pt.overview.length < 40) && en.overview) {
-      overview = await translateToPtBR(en.overview);
-    }
-
-    const year = (media === 'tv' ? en.first_air_date : en.release_date || '').slice(0, 4);
-    const imdbId = en.external_ids && en.external_ids.imdb_id;
-    const runtime = media === 'tv'
-      ? en.episode_run_time && en.episode_run_time[0] ? en.episode_run_time[0] + ' min' : undefined
-      : en.runtime ? en.runtime + ' min' : undefined;
-
-    const mediaType = type === 'series' ? 'series' : 'movie';
-    const poster = imdbId ? buildRpdbPoster('imdb', imdbId) : buildRpdbPoster('tmdb', mediaType + '-' + tmdbId);
-
-    const meta = {
-      id: imdbId || args.id,
-      type,
-      name: title || 'Unknown',
-      poster: poster || buildPoster(en.poster_path),
-      background: buildBackdrop(en.backdrop_path),
-      description: overview,
-      releaseInfo: year || undefined,
-      genres: (en.genres || []).map((g) => g.name),
-      cast: en.credits && en.credits.cast ? en.credits.cast.slice(0, 12).map((c) => c.name) : [],
-      runtime,
-      imdbRating: en.vote_average ? en.vote_average.toFixed(1) : undefined,
-    };
-
-    if (type === 'series') meta.videos = await getSeriesVideos(tmdbId);
-    return { meta };
-  } catch (err) {
-    console.error('Meta error:', err.message);
-    return { meta: null };
-  }
-});
-
-builder.defineStreamHandler(async (args) => {
-  try {
-    let imdbId = null;
-    let title = '';
-    let season = null;
-    let episode = null;
-
-    if (args.id.startsWith('tt')) {
-      imdbId = args.id;
-    } else if (args.id.startsWith('tmdb:')) {
-      const parts = args.id.split(':');
-      const type = parts[1];
-      const tmdbId = parts[2];
-      const media = type === 'series' ? 'tv' : 'movie';
-      const data = await tmdbFetch('/' + media + '/' + tmdbId, { append_to_response: 'external_ids', language: 'en-US' });
-      imdbId = data.external_ids && data.external_ids.imdb_id;
-      title = media === 'tv' ? data.name : data.title;
-      if (parts.length >= 5) {
-        season = parts[3];
-        episode = parts[4];
-      }
-    }
-
-    if (args.extra && args.extra.season) season = args.extra.season;
-    if (args.extra && args.extra.episode) episode = args.extra.episode;
-
-    let searchUrl = TORBOX_SEARCH + '/torrents/';
-    if (imdbId) {
-      searchUrl += 'imdb:' + imdbId;
-    } else if (title) {
-      searchUrl += 'search/' + encodeURIComponent(title);
-    } else {
-      return { streams: [] };
-    }
-
-    const params = new URLSearchParams({ check_cache: 'true', cached_only: 'true' });
-    if (season) params.set('season', season);
-    if (episode) params.set('episode', episode);
-
-    const res = await fetch(searchUrl + '?' + params.toString(), {
-      headers: { Authorization: 'Bearer ' + TORBOX_API_KEY },
-    });
-    if (!res.ok) return { streams: [] };
-    const json = await res.json();
-    let torrents = (json.data && json.data.torrents) || [];
-
-    torrents.sort((a, b) => ptBrScore(b.raw_title || b.title) - ptBrScore(a.raw_title || a.title));
-
-    const streams = [];
-    for (const t of torrents.slice(0, 8)) {
-      if (!t.magnet && !t.hash) continue;
-      const score = ptBrScore(t.raw_title || t.title);
-      const label = score >= 60 ? '🇧🇷 ' : '';
-      streams.push({
-        name: label + (t.raw_title || t.title || 'Torbox'),
-        title: (t.raw_title || t.title || 'Stream') + (t.size ? ' • ' + Math.round(t.size / 1024 / 1024) + ' MB' : ''),
-        url: TORBOX_API + '/torrents/requestdl?token=' + TORBOX_API_KEY + '&torrent_id=' + (t.id || t.hash) + '&redirect=true',
-        behaviorHints: { notWebReady: true },
-      });
-    }
-
-    return { streams };
-  } catch (err) {
-    console.error('Stream error:', err.message);
-    return { streams: [] };
-  }
-});
-
-const port = process.env.PORT || 7000;
-serveHTTP(builder.getInterface(), { port: Number(port) });
-console.log('Asia Torbox addon running on port ' + port);
+const AD_DOMAINS = [
+  'doubleclick.net','googlesyndication.com','adservice.google',
+  'popads','popcash','propellerads','exoclick','juicyads',
+  'adsterra','trafficjunky','mgid.com','taboola','outbrain',
+  'adnxs.com','advertising.com','openx.net','rubiconproject.com',
+  'pubmatic.com','indexww.com','criteo.com','onetag.com',
+  'adtng.com','ad-maven.com','adskeeper.co.uk','adoperators.com'
+];
+function
