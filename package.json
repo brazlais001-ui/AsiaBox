@@ -1,18 +1,22 @@
 {
   "name": "stremio-asiabox",
   "version": "1.0.0",
-  "description": "AsiaBox — K-Drama / C-Drama / J-Drama. Prioridade: LEG PT-BR → DUB PT-BR → ORIGINAL",
+  "description": "AsiaBox — K-Drama / C-Drama / J-Drama. Prioridade 100% PT-BR embutido. Usa DramaDrip com link MP4 direto + hosts fallback.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js"
   },
-  "keywords": ["stremio","addon","kdrama","cdrama","jdrama","dorama","pt-br"],
+  "keywords": ["stremio","addon","kdrama","cdrama","jdrama","dorama","pt-br","dramadrip"],
   "author": "AsiaBox",
   "license": "MIT",
   "dependencies": {
     "stremio-addon-sdk": "^1.6.10",
-    "cheerio": "^1.0.0"
+    "cheerio": "^1.0.0",
+    "axios": "^1.7.7",
+    "form-data": "^4.0.1",
+    "tough-cookie": "^4.1.4",
+    "axios-cookiejar-support": "^5.0.3"
   },
   "engines": { "node": ">=18" }
 }
